@@ -74,6 +74,7 @@ impl TestCase {
         let command_args = [
             "--elf", &elf_path,
             "--expect-text", "Backtrace",
+            "--expect-text", "ERROR - Not enough memory to allocate",
             "--timeout", "5000",
             "--timeout-exit-code", "0",
             "--serial-log-file", serial_log_file.to_str().ok_or("Failed to convert path to string")?
