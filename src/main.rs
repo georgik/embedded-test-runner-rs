@@ -12,6 +12,10 @@ struct Args {
     /// Directory where output files will be stored
     #[arg(short, long)]
     output_directory: String,
+
+    /// Continue execution even if a test fails
+    #[arg(short, long)]
+    continue_on_error: bool,
 }
 
 struct TestCase {
@@ -50,7 +54,7 @@ impl TestCase {
     }
 
 
-    fn run(&self, project_path: &Path, output_directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn run(&self, project_path: &Path, output_directory: &Path, continue_on_error: bool) -> Result<bool, Box<dyn std::error::Error>> {
         let example_name = Path::new(&self.file_path)
             .file_stem()
             .and_then(std::ffi::OsStr::to_str)
@@ -68,7 +72,9 @@ impl TestCase {
         } else {
             env::current_dir()?.join(output_directory)
         };
-        let serial_log_file = absolute_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
+        let tmp_output_dir = absolute_output_dir.join("tmp");
+        fs::create_dir_all(&tmp_output_dir)?; // Ensure 'tmp' directory exists
+        let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
         // Constructing the command to run
         let command_args = [
@@ -76,7 +82,7 @@ impl TestCase {
             "--expect-text", "Backtrace",
             "--expect-text", "ERROR - Not enough memory to allocate",
             "--timeout", "5000",
-            "--timeout-exit-code", "0",
+            // "--timeout-exit-code", "0",
             "--serial-log-file", serial_log_file.to_str().ok_or("Failed to convert path to string")?
         ];
         let command_to_run = format!("wokwi-cli {}", command_args.join(" "));
@@ -90,18 +96,31 @@ impl TestCase {
             .current_dir(project_path)
             .output()?;
 
-        if !output.status.success() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "wokwi-cli command failed",
-            )));
-        }
+       // Adjust the output path to use the 'tmp' directory
+       let tmp_output_dir = output_directory.join("tmp");
+       fs::create_dir_all(&tmp_output_dir)?; // Ensure 'tmp' directory exists
+       let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
+       // Existing command execution code...
+
+       // Determine the test result and move the file to 'passed' or 'failed' directory
+       let test_passed = output.status.success();
+       let result_dir = if test_passed { "passed" } else { "failed" };
+       let final_output_dir = output_directory.join(result_dir);
+       fs::create_dir_all(&final_output_dir)?; // Ensure directory exists
+       fs::rename(serial_log_file, final_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode)))?;
+
+       if !test_passed && !continue_on_error {
+           return Err(Box::new(std::io::Error::new(
+               std::io::ErrorKind::Other,
+               "Test failed and continue_on_error is false",
+           )));
+       }
         // Print the command's stdout to the console
         println!("{}", String::from_utf8(output.stdout.clone())?);
 
-        Ok(())
-    }
+       Ok(test_passed)
+   }
 }
 
 fn discover_test_cases(path: &Path) -> Vec<TestCase> {
@@ -140,6 +159,9 @@ fn discover_test_cases(path: &Path) -> Vec<TestCase> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    let mut passed_tests = 0;
+    let mut failed_tests = 0;
+
     let project_path = Path::new(&args.project_path);
     let output_directory = Path::new(&args.output_directory);
 
@@ -156,8 +178,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for test in test_cases {
-        test.run(&project_path, &output_directory)?;
+        match test.run(&project_path, &output_directory, args.continue_on_error) {
+            Ok(true) => passed_tests += 1,
+            Ok(false) => failed_tests += 1,
+            Err(e) => {
+                println!("Error: {}", e);
+                failed_tests += 1;
+                if !args.continue_on_error {
+                    break;
+                }
+            }
+        }
     }
+
+    // Display the summary
+    println!("Test run summary:");
+    println!("Passed tests: {}", passed_tests);
+    println!("Failed tests: {}", failed_tests);
 
     Ok(())
 }

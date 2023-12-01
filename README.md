@@ -7,5 +7,20 @@
 ## Example of usage
 
 ```
-cargo run -- --project-path ../esp32-memory-limit --output-directory out
+cargo run -- --project-path ../esp32-memory-limit --output-directory out --continue-on-error
+```
+
+Results will be stored in directories: `out/passed`, `out/failed`
+
+## Command line parameters
+
+```
+Usage: memory-test-runner [OPTIONS] --project-path <PROJECT_PATH> --output-directory <OUTPUT_DIRECTORY>
+
+Options:
+  -p, --project-path <PROJECT_PATH>          Sets the path to the Rust project
+  -o, --output-directory <OUTPUT_DIRECTORY>  Directory where output files will be stored
+  -c, --continue-on-error                    Continue execution even if a test fails
+  -h, --help                                 Print help
+  -V, --version                              Print version
 ```
