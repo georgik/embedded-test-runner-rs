@@ -66,6 +66,10 @@ impl TestCase {
             example_name
         );
 
+        // Constructing the scenario file path based on the build mode
+        let scenario_dir = Path::new("scenarios").join(&self.build_mode);
+        let scenario_file = scenario_dir.join(format!("{}.yaml", example_name));
+
         // Ensure the output directory is an absolute path
         let absolute_output_dir = if output_directory.is_absolute() {
             output_directory.to_path_buf()
@@ -73,16 +77,14 @@ impl TestCase {
             env::current_dir()?.join(output_directory)
         };
         let tmp_output_dir = absolute_output_dir.join("tmp");
-        fs::create_dir_all(&tmp_output_dir)?; // Ensure 'tmp' directory exists
+        fs::create_dir_all(&tmp_output_dir)?;
         let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
         // Constructing the command to run
         let command_args = [
             "--elf", &elf_path,
-            "--expect-text", "Backtrace",
-            "--expect-text", "ERROR - Not enough memory to allocate",
+            "--scenario", scenario_file.to_str().ok_or("Failed to convert scenario path to string")?,
             "--timeout", "5000",
-            // "--timeout-exit-code", "0",
             "--serial-log-file", serial_log_file.to_str().ok_or("Failed to convert path to string")?
         ];
         let command_to_run = format!("wokwi-cli {}", command_args.join(" "));
