@@ -1,7 +1,5 @@
 use clap::Parser;
-use std::process::Command as SystemCommand;
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path, env};
 
 /// Rust Test Orchestrator for running and comparing test cases
 #[derive(Parser, Debug)]
@@ -64,11 +62,22 @@ impl TestCase {
             example_name
         );
 
-        let output_file_name = format!("{}-{}.txt", example_name, self.build_mode);
-        let output_path = output_directory.join(&output_file_name);
+        // Ensure the output directory is an absolute path
+        let absolute_output_dir = if output_directory.is_absolute() {
+            output_directory.to_path_buf()
+        } else {
+            env::current_dir()?.join(output_directory)
+        };
+        let serial_log_file = absolute_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
         // Constructing the command to run
-        let command_args = ["--elf", &elf_path, "--expect-text", "Backtrace", "--timeout", "5000", "--timeout-exit-code", "0"];
+        let command_args = [
+            "--elf", &elf_path,
+            "--expect-text", "Backtrace",
+            "--timeout", "5000",
+            "--timeout-exit-code", "0",
+            "--serial-log-file", serial_log_file.to_str().ok_or("Failed to convert path to string")?
+        ];
         let command_to_run = format!("wokwi-cli {}", command_args.join(" "));
 
         // Printing information about the test being run
@@ -87,9 +96,8 @@ impl TestCase {
             )));
         }
 
-        let output_str = String::from_utf8(output.stdout.clone())?;
-        println!("{}", output_str); // Print the output to the console
-        fs::write(output_path, output.stdout)?; // Write the output to the file
+        // Print the command's stdout to the console
+        println!("{}", String::from_utf8(output.stdout.clone())?);
 
         Ok(())
     }
