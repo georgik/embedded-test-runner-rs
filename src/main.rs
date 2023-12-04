@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
-use std::{fs, path::Path, env};
+use std::{fs, path::Path};
+use std::process::Stdio;
 use tokio::time::{self, Duration, timeout};
 use tokio::process::Command as TokioCommand;
 
@@ -80,58 +81,67 @@ impl TestCase {
         fs::create_dir_all(&tmp_output_dir)?;
         let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
-        let mut command = tokio::process::Command::new(match service {
-            "espflash" => "espflash",
-            "qemu" => "qemu-system-riscv32",
-            "wokwi" => "wokwi-cli",
-            _ => return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Unknown service",
-            ))),
-        });
-
-        command.args(match service {
-            "espflash" => vec!["flash", "-p", "/dev/tty.usbmodem1101", "--monitor", &elf_path],
-            "qemu" => {
-                let mut args = vec![];
-                if self.build_mode == "release" {
-                    args.push("--release");
-                }
-                // Additional arguments for qemu can be added here
-                args
+        let mut command_args = Vec::new();
+        let command_to_run = match service {
+            "espflash" => {
+                command_args.push("flash".to_string());
+                command_args.push("-p".to_string());
+                command_args.push("/dev/tty.usbmodem1101".to_string());
+                command_args.push("--monitor".to_string());
+                command_args.push(elf_path.clone());
+                "espflash"
             },
-            "wokwi" => vec!["--elf", &elf_path, "--scenario", scenario_file.to_str().unwrap_or_default(), "--timeout", "5000", "--serial-log-file", serial_log_file.to_str().unwrap_or_default()],
-            _ => vec![],
-        }).current_dir(project_path)
-          .stdout(std::process::Stdio::piped())
-          .stderr(std::process::Stdio::piped());
+            "qemu" => {
+                if self.build_mode == "release" {
+                    command_args.push("--release".to_string());
+                }
+                "qemu-system-riscv32"
+            },
+            "wokwi" => {
+                command_args.push("--elf".to_string());
+                command_args.push(elf_path.clone());
+                command_args.push("--scenario".to_string());
+                command_args.push(scenario_file.to_str().ok_or("Failed to convert scenario path to string")?.to_string());
+                command_args.push("--timeout".to_string());
+                command_args.push("5000".to_string());
+                command_args.push("--serial-log-file".to_string());
+                command_args.push(serial_log_file.to_str().ok_or("Failed to convert path to string")?.to_string());
+                "wokwi-cli"
+            },
+            _ => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unknown service",
+                )));
+            }
+        };
+
+        let mut command = TokioCommand::new(command_to_run);
+        command.args(&command_args)
+               .current_dir(project_path)
+               .stdout(Stdio::piped())
+               .stderr(Stdio::piped());
 
         let mut child = command.spawn()?;
+        let child_id = child.id().expect("Failed to get child process id");
 
         let test_timeout = Duration::from_secs(5);
-
-        let test_passed = match timeout(test_timeout, async {
-            match child.wait_with_output().await {
+        let test_passed = match timeout(test_timeout, child.wait_with_output()).await {
+            Ok(result) => match result {
                 Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-
-                    // Print stdout and stderr
-                    println!("stdout: {}", stdout);
-                    eprintln!("stderr: {}", stderr);
-
+                    if service == "espflash" {
+                        fs::write(&serial_log_file, &output.stdout)?;
+                    }
                     output.status.success()
-                }
+                },
                 Err(e) => {
                     eprintln!("Command execution error: {}", e);
                     false
                 }
-            }
-        }).await {
-            Ok(result) => result,
+            },
             Err(_) => {
                 eprintln!("Test {} timed out", example_name);
-                let _ = child.kill().await; // Attempt to kill the child process
+                kill_child_process(child_id).await?;
                 false
             }
         };
@@ -176,6 +186,24 @@ fn discover_test_cases(path: &Path) -> Vec<TestCase> {
     }
     test_cases.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     test_cases
+}
+
+async fn kill_child_process(child_id: u32) -> Result<(), Box<dyn std::error::Error>> {
+    // Use a command line utility to kill the process
+    let kill_command = std::process::Command::new("kill")
+        .arg(format!("{}", child_id))
+        .spawn()?
+        .wait()
+        .expect("Failed to kill the child process");
+
+    if kill_command.success() {
+        Ok(())
+    } else {
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to kill the timed out process",
+        )))
+    }
 }
 
 #[tokio::main]
