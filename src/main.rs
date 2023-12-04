@@ -18,6 +18,9 @@ struct Args {
     #[arg(short, long)]
     continue_on_error: bool,
 
+    #[arg(short = 'n', long)]
+    skip_build: bool,
+
     #[arg(short = 'j', long, default_value_t = 0)]
     parallelism: usize,
 
@@ -210,10 +213,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_test_time = Duration::new(0, 0);
 
     // Build all test cases before running them
-    for test in &test_cases {
-        let start = Instant::now();
-        test.build(&project_path)?;
-        total_build_time += start.elapsed();
+    if !args.skip_build {
+        for test in &test_cases {
+            let start = Instant::now();
+            test.build(&project_path)?;
+            total_build_time += start.elapsed();
+        }
     }
 
     let test_start = Instant::now();
