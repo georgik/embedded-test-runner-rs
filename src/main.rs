@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use std::thread;
-use std::{fs, path::Path, env};
+use std::{fs, path::Path, env, time::{Duration, Instant}, thread};
 
 /// Rust Test Orchestrator for running and comparing test cases
 #[derive(Parser, Debug)]
@@ -176,6 +175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut passed_tests = 0;
     let mut failed_tests = 0;
 
+    let mut total_build_time = Duration::new(0, 0);
+    let mut total_test_time = Duration::new(0, 0);
+
     let test_cases = discover_test_cases(&project_path);
 
     // Print the list of test cases
@@ -186,9 +188,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build all test cases before running them
     for test in &test_cases {
+        let start = Instant::now();
         test.build(&project_path)?;
+        total_build_time += start.elapsed();
     }
 
+    let test_start = Instant::now();
     // Run tests in parallel
     let mut handles = Vec::new();
     for test in &test_cases {
@@ -232,8 +237,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Test {} in {} mode: {}", file_path, build_mode, if result { "passed" } else { "failed" });
     }
 
+    total_test_time += test_start.elapsed();
+
     // Display the summary
     println!("Test run summary:");
+    println!("Total build time: {:?}", total_build_time);
+    println!("Total test time: {:?}", total_test_time);
     println!("Passed tests: {}", passed_tests);
     println!("Failed tests: {}", failed_tests);
 
