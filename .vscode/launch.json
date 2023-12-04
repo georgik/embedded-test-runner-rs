@@ -1,0 +1,67 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'memory-test-runner'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=memory-test-runner",
+                    "--package=memory-test-runner",
+                ],
+                "filter": {
+                    "name": "memory-test-runner",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--project-path",
+                "../esp32-memory-limit",
+                "--output-directory",
+                "out",
+                "--continue-on-error",
+                "--service",
+                "espflash",
+                "-j",
+                "1",
+                "--skip-build"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'memory-test-runner'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=memory-test-runner",
+                    "--package=memory-test-runner",
+                ],
+                "filter": {
+                    "name": "memory-test-runner",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--project-path",
+                "../esp32-memory-limit",
+                "--output-directory",
+                "out",
+                "--continue-on-error",
+                "--service",
+                "espflash",
+                "-j",
+                "1",
+                "--skip-build"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
