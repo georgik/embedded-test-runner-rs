@@ -80,78 +80,45 @@ impl TestCase {
         fs::create_dir_all(&tmp_output_dir)?;
         let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
-        // Declare command_to_run and command_args outside of the match block
-        let command_to_run = match service {
+        let mut command = tokio::process::Command::new(match service {
             "espflash" => "espflash",
             "qemu" => "qemu-system-riscv32",
             "wokwi" => "wokwi-cli",
             _ => return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Unknown service",
+                std::io::ErrorKind::InvalidInput,
+                "Unknown service",
             ))),
-        };
+        });
 
-        let mut command_args = Vec::new();
-        match service {
-            "espflash" => {
-                command_args.push("flash".to_string());
-                command_args.push("-p".to_string());
-                command_args.push("/dev/tty.usbmodem1101".to_string());
-                command_args.push("--monitor".to_string());
-                command_args.push(elf_path);
-            },
+        command.args(match service {
+            "espflash" => vec!["flash", "-p", "/dev/tty.usbmodem1101", "--monitor", &elf_path],
             "qemu" => {
+                let mut args = vec![];
                 if self.build_mode == "release" {
-                    command_args.push("--release".to_string());
+                    args.push("--release");
                 }
-                // Additional arguments for qemu
+                // Additional arguments for qemu can be added here
+                args
             },
-            "wokwi" => {
-                command_args.push("--elf".to_string());
-                command_args.push(elf_path);
-                command_args.push("--scenario".to_string());
-                // Handle Option returned by to_str()
-                let scenario_path_str = scenario_file.to_str().ok_or("Failed to convert scenario path to string")?.to_string();
-                command_args.push(scenario_path_str);
-                command_args.push("--timeout".to_string());
-                command_args.push("5000".to_string());
-                command_args.push("--serial-log-file".to_string());
-                // Handle Option returned by to_str()
-                let serial_log_file_str = serial_log_file.to_str().ok_or("Failed to convert path to string")?.to_string();
-                command_args.push(serial_log_file_str);
-            },
-            _ => {} // Already handled above
-        };
+            "wokwi" => vec!["--elf", &elf_path, "--scenario", scenario_file.to_str().unwrap_or_default(), "--timeout", "5000", "--serial-log-file", serial_log_file.to_str().unwrap_or_default()],
+            _ => vec![],
+        }).current_dir(project_path)
+          .stdout(std::process::Stdio::piped())
+          .stderr(std::process::Stdio::piped());
 
-        let test_timeout = match service {
-            "wokwi" => { Duration::from_secs(60) }
-            _ => { Duration::from_secs(5) }
-        };
+        let mut child = command.spawn()?;
 
-        // Print command with arguments
-        println!("Running: {} {:?}", command_to_run, command_args);
+        let test_timeout = Duration::from_secs(5);
 
         let test_passed = match timeout(test_timeout, async {
-            let mut command = TokioCommand::new(command_to_run);
-            command.args(&command_args).current_dir(project_path)
-                   .stdout(std::process::Stdio::piped())
-                   .stderr(std::process::Stdio::piped());
-
-            let output = command.output().await;
-            match output {
+            match child.wait_with_output().await {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
 
-                    // Print stdout
-                    for line in stdout.split('\n') {
-                        println!("{}", line);
-                    }
-
-                    // Print stderr
-                    for line in stderr.split('\n') {
-                        eprintln!("{}", line);
-                    }
+                    // Print stdout and stderr
+                    println!("stdout: {}", stdout);
+                    eprintln!("stderr: {}", stderr);
 
                     output.status.success()
                 }
@@ -164,6 +131,7 @@ impl TestCase {
             Ok(result) => result,
             Err(_) => {
                 eprintln!("Test {} timed out", example_name);
+                let _ = child.kill().await; // Attempt to kill the child process
                 false
             }
         };
