@@ -20,6 +20,9 @@ struct Args {
 
     #[arg(short = 'j', long, default_value_t = 0)]
     parallelism: usize,
+
+    #[arg(short, long, default_value = "wokwi")]
+    service: String,
 }
 
 #[derive(Clone)]
@@ -59,7 +62,7 @@ impl TestCase {
     }
 
 
-    fn run(&self, project_path: &Path, output_directory: &Path, continue_on_error: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    fn run(&self, project_path: &Path, output_directory: &Path, service: &str, continue_on_error: bool) -> Result<bool, Box<dyn std::error::Error>> {
         let example_name = Path::new(&self.file_path)
             .file_stem()
             .and_then(std::ffi::OsStr::to_str)
@@ -82,23 +85,48 @@ impl TestCase {
             env::current_dir()?.join(output_directory)
         };
         let tmp_output_dir = absolute_output_dir.join("tmp");
+
         fs::create_dir_all(&tmp_output_dir)?;
         let serial_log_file = tmp_output_dir.join(format!("{}-{}.txt", example_name, self.build_mode));
 
-        // Constructing the command to run
-        let command_args = [
-            "--elf", &elf_path,
-            "--scenario", scenario_file.to_str().ok_or("Failed to convert scenario path to string")?,
-            "--timeout", "5000",
-            "--serial-log-file", serial_log_file.to_str().ok_or("Failed to convert path to string")?
-        ];
-        let command_to_run = format!("wokwi-cli {}", command_args.join(" "));
+        let mut command_args = Vec::new();
+        let command_to_run = match service {
+            "espflash" => {
+                command_args.push("flash".to_string());
+                command_args.push("-p".to_string());
+                command_args.push("/dev/tty.usbmodem1101".to_string());
+                command_args.push("--monitor".to_string());
+                command_args.push(elf_path);
+                "espflash"
+            },
+            "qemu" => {
+                if self.build_mode == "release" {
+                    command_args.push("--release".to_string());
+                }
+                "qemu-system-riscv32"
+            }
+            "wokwi" => {
+                command_args.push("--elf".to_string());
+                command_args.push(elf_path);
+                command_args.push("--scenario".to_string());
+                command_args.push(scenario_file.to_str().ok_or("Failed to convert scenario path to string")?.to_string());
+                command_args.push("--timeout".to_string());
+                command_args.push("5000".to_string());
+                command_args.push("--serial-log-file".to_string());
+                command_args.push(serial_log_file.to_str().ok_or("Failed to convert path to string")?.to_string());
+                "wokwi-cli"
+            },
+            _ => return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unknown service",
+            )))
+        };
 
-        // Printing information about the test being run
         println!("Testing {}...", example_name);
-        println!("Command: {}", command_to_run);
+        println!("Working directory: {}", project_path.display());
+        println!("Command: {} {}", command_to_run, command_args.join(" "));
 
-        let output = Command::new("wokwi-cli")
+        let output = Command::new(command_to_run)
             .args(&command_args)
             .current_dir(project_path)
             .output()?;
@@ -166,25 +194,20 @@ fn discover_test_cases(path: &Path) -> Vec<TestCase> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Clone the necessary fields from args
+    // Convert paths to `PathBuf` for cloning
     let project_path = PathBuf::from(&args.project_path);
     let output_directory = PathBuf::from(&args.output_directory);
-    let continue_on_error = args.continue_on_error;
+
+    let service = args.service;
     let parallelism = if args.parallelism == 0 { num_cpus::get() } else { args.parallelism };
-
-    let mut passed_tests = 0;
-    let mut failed_tests = 0;
-
-    let mut total_build_time = Duration::new(0, 0);
-    let mut total_test_time = Duration::new(0, 0);
 
     let test_cases = discover_test_cases(&project_path);
 
-    // Print the list of test cases
-    println!("Discovered test cases:");
-    for test in &test_cases {
-        println!("{} - {}", test.file_path, test.build_mode);
-    }
+    // Initialize counters and timers
+    let mut passed_tests = 0;
+    let mut failed_tests = 0;
+    let mut total_build_time = Duration::new(0, 0);
+    let mut total_test_time = Duration::new(0, 0);
 
     // Build all test cases before running them
     for test in &test_cases {
@@ -194,22 +217,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let test_start = Instant::now();
+
     // Run tests in parallel
     let mut handles = Vec::new();
-    for test in &test_cases {
+    for test in test_cases {
         let project_path_clone = project_path.clone();
         let output_directory_clone = output_directory.clone();
-        let test_clone = test.clone();
+        let service_clone = service.clone();  // Clone `service` for each thread
 
         let handle = thread::spawn(move || {
-            match test_clone.run(&project_path_clone, &output_directory_clone, continue_on_error) {
-                Ok(true) => (true, test_clone.file_path, test_clone.build_mode),
-                Ok(false) => (false, test_clone.file_path, test_clone.build_mode),
-                Err(e) => {
+            test.run(&project_path_clone, &output_directory_clone, &service_clone, args.continue_on_error)
+                .map(|result| (result, test.file_path.clone(), test.build_mode.clone()))
+                .unwrap_or_else(|e| {
                     println!("Error: {}", e);
-                    (false, test_clone.file_path, test_clone.build_mode)
-                }
-            }
+                    (false, test.file_path.clone(), test.build_mode.clone())
+                })
         });
 
         handles.push(handle);
