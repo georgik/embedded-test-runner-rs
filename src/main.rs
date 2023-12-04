@@ -1,4 +1,6 @@
 use clap::Parser;
+use std::path::PathBuf;
+use std::thread;
 use std::{fs, path::Path, env};
 
 /// Rust Test Orchestrator for running and comparing test cases
@@ -16,8 +18,12 @@ struct Args {
     /// Continue execution even if a test fails
     #[arg(short, long)]
     continue_on_error: bool,
+
+    #[arg(short = 'j', long, default_value_t = 0)]
+    parallelism: usize,
 }
 
+#[derive(Clone)]
 struct TestCase {
     file_path: String,
     build_mode: String, // "debug" or "release"
@@ -161,11 +167,14 @@ fn discover_test_cases(path: &Path) -> Vec<TestCase> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // Clone the necessary fields from args
+    let project_path = PathBuf::from(&args.project_path);
+    let output_directory = PathBuf::from(&args.output_directory);
+    let continue_on_error = args.continue_on_error;
+    let parallelism = if args.parallelism == 0 { num_cpus::get() } else { args.parallelism };
+
     let mut passed_tests = 0;
     let mut failed_tests = 0;
-
-    let project_path = Path::new(&args.project_path);
-    let output_directory = Path::new(&args.output_directory);
 
     let test_cases = discover_test_cases(&project_path);
 
@@ -175,22 +184,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{} - {}", test.file_path, test.build_mode);
     }
 
+    // Build all test cases before running them
     for test in &test_cases {
         test.build(&project_path)?;
     }
 
-    for test in test_cases {
-        match test.run(&project_path, &output_directory, args.continue_on_error) {
-            Ok(true) => passed_tests += 1,
-            Ok(false) => failed_tests += 1,
-            Err(e) => {
-                println!("Error: {}", e);
-                failed_tests += 1;
-                if !args.continue_on_error {
-                    break;
+    // Run tests in parallel
+    let mut handles = Vec::new();
+    for test in &test_cases {
+        let project_path_clone = project_path.clone();
+        let output_directory_clone = output_directory.clone();
+        let test_clone = test.clone();
+
+        let handle = thread::spawn(move || {
+            match test_clone.run(&project_path_clone, &output_directory_clone, continue_on_error) {
+                Ok(true) => (true, test_clone.file_path, test_clone.build_mode),
+                Ok(false) => (false, test_clone.file_path, test_clone.build_mode),
+                Err(e) => {
+                    println!("Error: {}", e);
+                    (false, test_clone.file_path, test_clone.build_mode)
                 }
             }
+        });
+
+        handles.push(handle);
+        if handles.len() == parallelism {
+            for handle in handles.drain(..) {
+                let (result, file_path, build_mode) = handle.join().unwrap();
+                if result {
+                    passed_tests += 1;
+                } else {
+                    failed_tests += 1;
+                }
+                println!("Test {} in {} mode: {}", file_path, build_mode, if result { "passed" } else { "failed" });
+            }
         }
+    }
+
+    // Join any remaining handles
+    for handle in handles {
+        let (result, file_path, build_mode) = handle.join().unwrap();
+        if result {
+            passed_tests += 1;
+        } else {
+            failed_tests += 1;
+        }
+        println!("Test {} in {} mode: {}", file_path, build_mode, if result { "passed" } else { "failed" });
     }
 
     // Display the summary
