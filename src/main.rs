@@ -130,33 +130,27 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
 
         let scenario_match = if let Some(scenario) = &scenario {
             let mut scenario_success = false;
-
-            // Processing each line for both output and scenario checking
             let mut line = String::new();
+
             while reader.read_line(&mut line).await? != 0 {
                 // Output the line to stdout
                 async_stdout.write_all(line.as_bytes()).await?;
 
                 // Check if the line matches any step in the scenario
                 for step in scenario.steps.iter() {
-                    // println!("**Searching for: {}", &step.wait_serial);
-
                     if line.contains(&step.wait_serial) {
-                        // println!("**Found: {}", &step.wait_serial);
                         scenario_success = true;
                         break;
                     }
                 }
-
-                // Clear the line buffer for the next read
                 line.clear();
 
                 // Break if scenario success
                 if scenario_success {
+                    child.kill().await?;  // Terminate espflash on scenario success
                     break;
                 }
             }
-
             scenario_success
         } else {
             false  // No scenario provided
@@ -166,19 +160,20 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
         let stderr_fut = tokio::io::copy(&mut child_stderr, &mut async_stderr);
         let _ = stderr_fut.await;
 
-        Ok::<bool, Box<dyn std::error::Error>>(scenario_match)  // Explicitly specify the error type
+        Ok::<bool, Box<dyn std::error::Error>>(scenario_match)
     };
 
     match timeout(test_timeout_duration, child_future).await {
-        Ok(result) => result.map_err(Into::into),
+        Ok(result) => {
+            result.map_err(Into::into)
+        },
         Err(_) => {
             eprintln!("Test execution timed out after {:?} seconds", test_timeout_duration.as_secs());
-            let mut child_guard = shared_child.lock().await; // Use the original Arc
-            child_guard.kill().await?;
+            let mut child_guard = shared_child.lock().await;
+            child_guard.kill().await?;  // Terminate espflash on timeout
             Ok(false)
         },
     }
-    
 }
 
 #[tokio::main]
