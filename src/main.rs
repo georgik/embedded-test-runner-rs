@@ -4,6 +4,8 @@ use std::process::Stdio;
 use std::path::PathBuf;
 use tokio::time::{timeout, Duration};
 use tokio::fs::File as TokioFile;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -27,7 +29,6 @@ struct Args {
 async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
     let elf_file_path = args.elf_path;
     let selected_service = args.service;
-    let test_timeout_duration = args.timeout.map(Duration::from_secs);
     let scenario_file_path = args.scenario;
     let test_output_file_path = args.output_file;
 
@@ -40,7 +41,7 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
                 .arg("--monitor")
                 .arg(&elf_file_path);
 
-                println!("Executing command: espflash flash --monitor {}", elf_file_path);
+            println!("Executing command: espflash flash --monitor {}", elf_file_path);
             espflash_command
         },
         "qemu" => {
@@ -61,7 +62,7 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
                 command_message.push_str(&format!(" --scenario {}", scenario_path.display()));
             }
 
-            if let Some(timeout) = test_timeout_duration {
+            if let Some(timeout) = args.timeout.map(Duration::from_secs) {
                 wokwi_command.arg("--timeout").arg(timeout.as_secs().to_string());
                 command_message.push_str(&format!(" --timeout {}", timeout.as_secs()));
             }
@@ -84,11 +85,17 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
 
     let test_timeout_duration = args.timeout.map_or(Duration::from_secs(60), Duration::from_secs);
 
-    let mut child = command_builder.spawn()?;
-    let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
-    let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
+    let child = command_builder.spawn()?;
+    let shared_child = Arc::new(Mutex::new(child));
 
-    let child_future = async {
+    let child_clone = Arc::clone(&shared_child);
+    let child_future = async move {
+        let mut child_guard = child_clone.lock().await;
+        let child = &mut *child_guard;
+
+        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
+        let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
+
         let mut output_file = if selected_service == "espflash" {
             if let Some(output_file_path) = &test_output_file_path {
                 Some(TokioFile::create(output_file_path).await?)
@@ -114,13 +121,15 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
             tokio::io::copy(&mut child_stderr, &mut file).await?;
         }
 
-        child.wait_with_output().await
+        child.wait().await.map(|status| status.success())
     };
 
     match timeout(test_timeout_duration, child_future).await {
-        Ok(output_result) => output_result.map(|output| output.status.success()).map_err(Into::into),
+        Ok(result) => result.map_err(Into::into),
         Err(_) => {
             eprintln!("Test execution timed out after {:?} seconds", test_timeout_duration.as_secs());
+            let mut child_guard = shared_child.lock().await;
+            child_guard.kill().await?;
             Ok(false)
         },
     }
