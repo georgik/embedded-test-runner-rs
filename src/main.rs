@@ -5,7 +5,7 @@ use serde_yaml;
 use std::process::Stdio;
 use std::path::PathBuf;
 use tokio::time::{timeout, Duration};
-use tokio::fs::File as TokioFile;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -121,56 +121,53 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
     let child_future = async move {
         let mut child_guard = shared_child_clone.lock().await;
         let child = &mut *child_guard;
-    
-        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
-        let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
-    
-        let mut output_file = if selected_service == "espflash" {
-            if let Some(output_file_path) = &test_output_file_path {
-                Some(TokioFile::create(output_file_path).await?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
 
+        let child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
+        let mut reader = BufReader::new(child_stdout);
         let mut async_stdout = tokio::io::stdout();
+        let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
         let mut async_stderr = tokio::io::stderr();
 
-        let stdout_fut = tokio::io::copy(&mut child_stdout, &mut async_stdout);
-        let stderr_fut = tokio::io::copy(&mut child_stderr, &mut async_stderr);
-    
-        let copy_fut = async {
-            match tokio::try_join!(stdout_fut, stderr_fut) {
-                Ok(_) => Ok::<bool, Box<dyn std::error::Error>>(true),
-                Err(e) => Err(e.into())
-            }
-        };
-    
-        let scenario_fut = async {
-            if let Some(scenario) = &scenario {
-                let mut scenario_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout for scenario"))?;
-                let mut reader = BufReader::new(&mut scenario_stdout);
-        
+        let scenario_match = if let Some(scenario) = &scenario {
+            let mut scenario_success = false;
+
+            // Processing each line for both output and scenario checking
+            let mut line = String::new();
+            while reader.read_line(&mut line).await? != 0 {
+                // Output the line to stdout
+                async_stdout.write_all(line.as_bytes()).await?;
+
+                // Check if the line matches any step in the scenario
                 for step in scenario.steps.iter() {
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).await? != 0 {
-                        if line.contains(&step.wait_serial) {
-                            return Ok(true);  // Scenario success
-                        }
-                        line.clear();
+                    // println!("**Searching for: {}", &step.wait_serial);
+
+                    if line.contains(&step.wait_serial) {
+                        // println!("**Found: {}", &step.wait_serial);
+                        scenario_success = true;
+                        break;
                     }
                 }
+
+                // Clear the line buffer for the next read
+                line.clear();
+
+                // Break if scenario success
+                if scenario_success {
+                    break;
+                }
             }
-            Ok(false)  // Scenario not met, or no scenario provided
+
+            scenario_success
+        } else {
+            false  // No scenario provided
         };
-    
-        tokio::select! {
-            result = copy_fut => result,
-            result = scenario_fut => result,
-    }
-};
+
+        // Copy stderr to async stderr
+        let stderr_fut = tokio::io::copy(&mut child_stderr, &mut async_stderr);
+        let _ = stderr_fut.await;
+
+        Ok::<bool, Box<dyn std::error::Error>>(scenario_match)  // Explicitly specify the error type
+    };
 
     match timeout(test_timeout_duration, child_future).await {
         Ok(result) => result.map_err(Into::into),
@@ -181,7 +178,7 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
             Ok(false)
         },
     }
-
+    
 }
 
 #[tokio::main]
