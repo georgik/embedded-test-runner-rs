@@ -35,9 +35,9 @@ struct Scenario {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-enum ScenarioStep {
-    WaitSerial { message: String },
+struct ScenarioStep {
+    #[serde(rename = "wait-serial")]
+    wait_serial: String,
 }
 
 async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
@@ -103,11 +103,28 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
     let shared_child = Arc::new(Mutex::new(child));
     let shared_child_clone = Arc::clone(&shared_child); // Clone the Arc
 
-    let child_future = async move {
-        let mut child_guard = shared_child_clone.lock().await; // Use the cloned Arc
-        let child = &mut *child_guard;        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
-        let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
+    // Read and parse the scenario file, if provided
+    let scenario = if let Some(scenario_path) = &scenario_file_path {
+        let file_contents = tokio::fs::read_to_string(scenario_path).await?;
+        match serde_yaml::from_str::<Scenario>(&file_contents) {
+            Ok(scenario) => Some(scenario),
+            Err(e) => {
+                let error: Box<dyn std::error::Error> = Box::new(e);
+                return Err(error);
+            }
+        }
+    } else {
+        println!("No scenario file provided");
+        None
+    };
 
+    let child_future = async move {
+        let mut child_guard = shared_child_clone.lock().await;
+        let child = &mut *child_guard;
+    
+        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
+        let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
+    
         let mut output_file = if selected_service == "espflash" {
             if let Some(output_file_path) = &test_output_file_path {
                 Some(TokioFile::create(output_file_path).await?)
@@ -123,45 +140,37 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
 
         let stdout_fut = tokio::io::copy(&mut child_stdout, &mut async_stdout);
         let stderr_fut = tokio::io::copy(&mut child_stderr, &mut async_stderr);
-
-        tokio::try_join!(stdout_fut, stderr_fut)?;
-
-        // Read and parse the scenario file, if provided
-        let scenario = if let Some(scenario_path) = &scenario_file_path {
-            let file_contents = tokio::fs::read_to_string(scenario_path).await?;
-            match serde_yaml::from_str::<Scenario>(&file_contents) {
-                Ok(scenario) => Some(scenario),
-                Err(e) => {
-                    let error: Box<dyn std::error::Error> = Box::new(e);
-                    return Err(error);
-                }
+    
+        let copy_fut = async {
+            match tokio::try_join!(stdout_fut, stderr_fut) {
+                Ok(_) => Ok::<bool, Box<dyn std::error::Error>>(true),
+                Err(e) => Err(e.into())
             }
-        } else {
-            println!("No scenario file provided");
-            None
         };
-
-        // Scenario handling
-        if let Some(scenario) = scenario {
-            let mut reader = BufReader::new(child_stdout);
-
-            for step in scenario.steps {
-                match step {
-                    ScenarioStep::WaitSerial { message } => {
-                        let mut line = String::new();
-                        while reader.read_line(&mut line).await? != 0 {
-                            if line.contains(&message) {
-                                return Ok(true);  // Scenario success
-                            }
-                            line.clear();
+    
+        let scenario_fut = async {
+            if let Some(scenario) = &scenario {
+                let mut scenario_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout for scenario"))?;
+                let mut reader = BufReader::new(&mut scenario_stdout);
+        
+                for step in scenario.steps.iter() {
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await? != 0 {
+                        if line.contains(&step.wait_serial) {
+                            return Ok(true);  // Scenario success
                         }
-                    },
+                        line.clear();
+                    }
                 }
             }
-        }
-
-        child.wait().await.map(|status| status.success()).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-    };
+            Ok(false)  // Scenario not met, or no scenario provided
+        };
+    
+        tokio::select! {
+            result = copy_fut => result,
+            result = scenario_fut => result,
+    }
+};
 
     match timeout(test_timeout_duration, child_future).await {
         Ok(result) => result.map_err(Into::into),
@@ -172,6 +181,7 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
             Ok(false)
         },
     }
+
 }
 
 #[tokio::main]
