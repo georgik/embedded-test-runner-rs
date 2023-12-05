@@ -1,9 +1,12 @@
 use clap::Parser;
 use tokio::process::Command as TokioCommand;
+use serde::Deserialize;
+use serde_yaml;
 use std::process::Stdio;
 use std::path::PathBuf;
 use tokio::time::{timeout, Duration};
 use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -24,6 +27,17 @@ struct Args {
 
     #[arg(short, long)]
     output_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Scenario {
+    steps: Vec<ScenarioStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum ScenarioStep {
+    WaitSerial { message: String },
 }
 
 async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
@@ -87,13 +101,11 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
 
     let child = command_builder.spawn()?;
     let shared_child = Arc::new(Mutex::new(child));
+    let shared_child_clone = Arc::clone(&shared_child); // Clone the Arc
 
-    let child_clone = Arc::clone(&shared_child);
     let child_future = async move {
-        let mut child_guard = child_clone.lock().await;
-        let child = &mut *child_guard;
-
-        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
+        let mut child_guard = shared_child_clone.lock().await; // Use the cloned Arc
+        let child = &mut *child_guard;        let mut child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
         let mut child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
 
         let mut output_file = if selected_service == "espflash" {
@@ -114,21 +126,48 @@ async fn run_test(args: Args) -> Result<bool, Box<dyn std::error::Error>> {
 
         tokio::try_join!(stdout_fut, stderr_fut)?;
 
-        if let Some(mut file) = output_file {
-            child_stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stdout"))?;
-            child_stderr = child.stderr.take().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to take stderr"))?;
-            tokio::io::copy(&mut child_stdout, &mut file).await?;
-            tokio::io::copy(&mut child_stderr, &mut file).await?;
+        // Read and parse the scenario file, if provided
+        let scenario = if let Some(scenario_path) = &scenario_file_path {
+            let file_contents = tokio::fs::read_to_string(scenario_path).await?;
+            match serde_yaml::from_str::<Scenario>(&file_contents) {
+                Ok(scenario) => Some(scenario),
+                Err(e) => {
+                    let error: Box<dyn std::error::Error> = Box::new(e);
+                    return Err(error);
+                }
+            }
+        } else {
+            println!("No scenario file provided");
+            None
+        };
+
+        // Scenario handling
+        if let Some(scenario) = scenario {
+            let mut reader = BufReader::new(child_stdout);
+
+            for step in scenario.steps {
+                match step {
+                    ScenarioStep::WaitSerial { message } => {
+                        let mut line = String::new();
+                        while reader.read_line(&mut line).await? != 0 {
+                            if line.contains(&message) {
+                                return Ok(true);  // Scenario success
+                            }
+                            line.clear();
+                        }
+                    },
+                }
+            }
         }
 
-        child.wait().await.map(|status| status.success())
+        child.wait().await.map(|status| status.success()).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     };
 
     match timeout(test_timeout_duration, child_future).await {
         Ok(result) => result.map_err(Into::into),
         Err(_) => {
             eprintln!("Test execution timed out after {:?} seconds", test_timeout_duration.as_secs());
-            let mut child_guard = shared_child.lock().await;
+            let mut child_guard = shared_child.lock().await; // Use the original Arc
             child_guard.kill().await?;
             Ok(false)
         },
